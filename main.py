@@ -1,5 +1,7 @@
 import bpy
 import bmesh
+import mathutils
+import math
 import numpy as np
 
 print("Starting export to Minecraft...");
@@ -39,6 +41,15 @@ class Position2d:
     
     def toJSON(self):
         return '{"x":' + format(self.x, ".20f") + ',"y":' + format(self.y, ".20f") + "}"
+
+class Rotation:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    
+    def toJSON(self):
+        return '{"x":' + format(self.x, ".20f") + ',"y":' + format(self.y, ".20f") + ',"z":' + format(self.z, ".20f") + "}"
 
 class UVMap:
     def __init__(self, offset, size):
@@ -91,7 +102,36 @@ class ModelNode:
         
         self.children = []
         
+        self.worldMatrix = self.getWorldMatrix();
+        
         self.mesh = cubesForBone(selected, bone)
+        
+        self.animations = self.getAnimations()
+    
+    def getWorldMatrix(self):
+        matrices = []
+        
+        currentBone = self.bone
+        
+        straightMatrix = mathutils.Matrix.Identity(3)
+        
+        while currentBone:
+            matrices.insert(0, currentBone.matrix)
+            
+            currentBone = currentBone.parent
+        
+        for item in matrices:
+            straightMatrix *= item
+        
+        return straightMatrix.inverted()
+        
+    def getAnimations(self):
+        result = {}
+        
+        for item in bpy.data.actions:
+            result[item.name] = Animation(item, self.bone, self.worldMatrix)
+        
+        return result
     
     def add(self, node):
         self.children.append(node)
@@ -101,6 +141,7 @@ class ModelNode:
         result += '"name":"' + self.name + '",'
         result += '"mountPoint":' + self.mountPoint.toJSON() + ','
         result += '"mesh":[' + ",".join([item.toJSON() for item in self.mesh]) + '],'
+        result += '"animations":{' + ",".join(['"' + item + '":' + self.animations[item].toJSON() for item in self.animations]) + '},'  
         result += '"children":[' + ",".join([item.toJSON() for item in self.children]) + ']'
         result += "}";
         
@@ -210,6 +251,85 @@ class BlenderUvMapper:
         
         for i, item in enumerate(uvs):
             item.uv = toApply[i]
+
+
+class Frame:
+    def __init__(self, position, rotation):
+        self.position = position
+        self.rotation = rotation
+    
+    def toJSON(self):
+        result = "{"
+        result += '"position":' + format(self.position, ".20f") + ','
+        result += '"rotation":' + self.rotation.toJSON()
+        result += "}";
+        
+        return result
+
+class Animation:
+    def __init__(self, action, bone, worldMatrix):
+        group = self.getGroup(action, bone.name)
+        
+        channels = self.getChannels(group, self.getChannelName(bone.name))
+        
+        self.worldMatrix = worldMatrix
+        
+        self.frames = self.getFrames(channels)
+    
+    def getFrames(self, channels):
+        result = []
+        
+        if len(channels) < 4:
+            return result
+        
+        length = len(channels[0].keyframe_points)
+        
+        for item in channels:
+            if not (len(item.keyframe_points) == length):
+                return result
+        
+        for i in range(length):
+            position = channels[0].keyframe_points[i].co[0]
+            
+            w = channels[0].keyframe_points[i].co[1]
+            x = channels[1].keyframe_points[i].co[1]
+            y = channels[2].keyframe_points[i].co[1]
+            z = channels[3].keyframe_points[i].co[1]
+            
+            quaternion = mathutils.Quaternion((w, x, y, z))
+            
+            newAxis = quaternion.axis * self.worldMatrix
+            
+            worldQuaternion = mathutils.Quaternion(newAxis, quaternion.angle)
+            
+            rotation = worldQuaternion.to_euler("XZY")
+            
+            #print([180.0 * item / math.pi for item in (e.x, e.y, e.z)])
+            
+            #[-37.16938402921081, -10.337963445640677, 17.325867660004544]
+                        
+            result.append(Frame(position, Rotation(rotation.x, -rotation.z, rotation.y)))
+            #result.append(Frame(position, Quaternion(w, x, y, z).toMinecraft(worldBasis)))
+        
+        return result
+    
+    def getGroup(self, action, boneName):
+        for item in action.groups:
+            if(item.name == boneName):
+                return item
+        
+        return None
+    
+    def getChannels(self, group, channelName):
+        if not group:
+            return []
+        return [item for item in group.channels if item.data_path == channelName]
+    
+    def getChannelName(self, boneName):
+        return 'pose.bones["' + boneName + '"].rotation_quaternion'
+    
+    def toJSON(self):
+        return '{"frames":[' + ",".join([item.toJSON() for item in self.frames]) + "]}" 
 
 def contains(item, list):
     for item1 in list:
